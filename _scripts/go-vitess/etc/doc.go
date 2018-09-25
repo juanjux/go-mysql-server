@@ -6,4 +6,4 @@
 //
 // It holds all the packages to create your own MySQL server and a full SQL
 // parser.
-package vitess // import "gopkg.in/src-d/go-vitess.v0"
+package vitess // import "gopkg.in/src-d/go-vitess.v1"

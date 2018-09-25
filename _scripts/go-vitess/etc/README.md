@@ -1,4 +1,4 @@
-# go-vitess [![GoDoc](https://godoc.org/gopkg.in/src-d/go-vitess.v0?status.svg)](https://godoc.org/gopkg.in/src-d/go-vitess.v0)
+# go-vitess [![GoDoc](https://godoc.org/gopkg.in/src-d/go-vitess.v1?status.svg)](https://godoc.org/gopkg.in/src-d/go-vitess.v1)
 
 `go-vitess` is an automatic filter-branch done by an [script](https://github.com/src-d/go-mysql-server/blob/master/_scripts/go-vitess/Makefile), of the great  [Vitess](github.com/youtube/vitess) project.
 
@@ -9,7 +9,7 @@ It holds all the packages to create your own MySQL server and a full SQL parser.
 ## Installation
 
 ```sh
-go get -v -u gopkg.in/src-d/go-vitess.v0/...
+go get -v -u gopkg.in/src-d/go-vitess.v1/...
 ```
 
 ## Contributions
