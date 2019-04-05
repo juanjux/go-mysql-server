@@ -1,3 +1,5 @@
+// +build mysql_go_onigurama
+
 package regex
 
 import (
