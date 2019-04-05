@@ -1,4 +1,4 @@
-// +build mysql_go_onigurama
+// +build oniguruma
 
 package regex
 
