@@ -109,27 +109,34 @@ func (h *Handler) ComQuery(
 
 	rowchan := make(chan sql.Row)
 	errchan := make(chan error)
+	quit := make(chan bool, 2)
 
-	// This goroutine will be selected giving a change to Vitess to call the
-	// handler.CloseConnection callback and enforcing the Timeout if configured
-	go func(rowc chan sql.Row, errc chan error) {
+	// This goroutine will be select{}ed giving a change to Vitess to call the
+	// handler.CloseConnection callback and enforcing the timeout if configured
+	go func() {
 		for {
+			select {
+			case <-quit:
+				return
+			default:
+			}
 			row, err := rows.Next()
 			if err != nil {
-				errc <- err
+				errchan <- err
 				return
 			}
-			rowc <- row
+			rowchan <- row
 		}
-	}(rowchan, errchan)
+	}()
 
 	// Default (big) waitTime is 3600, but it wont matter if there is no timeout
 	// because the loop will just iterate again. If there is a timeout, it will
 	// be enforced to ensure that Vitess has a chance to call Handler.CloseConnection()
-	waitTime := 3600 * time.Second
+	waitTime := 1 * time.Second
 	if h.readTimeout > 0 {
 		waitTime = h.readTimeout
 	}
+rowLoop:
 	for {
 		if r == nil {
 			r = &sqltypes.Result{Fields: schemaToFields(schema)}
@@ -148,14 +155,15 @@ func (h *Handler) ComQuery(
 		select {
 		case err := <-errchan:
 			if err == io.EOF {
-				goto EndFor
+				break rowLoop
 			}
 
 			return err
 		case row := <-rowchan:
 			outputRow, err := rowToSQL(schema, row)
 			if err != nil {
-				return err
+				quit <-true
+				break rowLoop
 			}
 
 			r.Rows = append(r.Rows, outputRow)
@@ -163,13 +171,16 @@ func (h *Handler) ComQuery(
 		case <-time.After(waitTime):
 			if h.readTimeout != 0 && waitTime >= h.readTimeout {
 				// Return so Vitess can call the CloseConnection callback
-				return RowTimeout.New()
+				err = RowTimeout.New()
+				quit <- true
+				break rowLoop
 			}
 		}
 	}
-EndFor:
-	close(rowchan)
-	close(errchan)
+
+	if err != nil {
+		return err
+	}
 
 	if err := rows.Close(); err != nil {
 		return err
