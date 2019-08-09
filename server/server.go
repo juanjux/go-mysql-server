@@ -54,7 +54,7 @@ func NewServer(cfg Config, e *sqle.Engine, sb SessionBuilder) (*Server, error) {
 		cfg.ConnWriteTimeout = 0
 	}
 
-	handler := NewHandler(e, NewSessionManager(sb, tracer, cfg.Address))
+	handler := NewHandler(e, NewSessionManager(sb, tracer, cfg.Address), cfg.ConnReadTimeout)
 	a := cfg.Auth.Mysql()
 	l, err := mysql.NewListener(cfg.Protocol, cfg.Address, a, handler, cfg.ConnReadTimeout, cfg.ConnWriteTimeout)
 	if err != nil {

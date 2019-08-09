@@ -11,7 +11,7 @@ import (
 	sqle "github.com/src-d/go-mysql-server"
 	"github.com/src-d/go-mysql-server/auth"
 	"github.com/src-d/go-mysql-server/sql"
-	errors "gopkg.in/src-d/go-errors.v1"
+	"gopkg.in/src-d/go-errors.v1"
 
 	"github.com/sirupsen/logrus"
 	"vitess.io/vitess/go/mysql"
@@ -22,24 +22,27 @@ import (
 var regKillCmd = regexp.MustCompile(`^kill (?:(query|connection) )?(\d+)$`)
 
 var errConnectionNotFound = errors.NewKind("Connection not found: %c")
+var RowTimeout = errors.NewKind("Timeout waiting for next row")
 
 // TODO parametrize
 const rowsBatch = 100
 
 // Handler is a connection handler for a SQLe engine.
 type Handler struct {
-	mu sync.Mutex
-	e  *sqle.Engine
-	sm *SessionManager
-	c  map[uint32]*mysql.Conn
+	mu          sync.Mutex
+	e           *sqle.Engine
+	sm          *SessionManager
+	c           map[uint32]*mysql.Conn
+	readTimeout time.Duration
 }
 
 // NewHandler creates a new Handler given a SQLe engine.
-func NewHandler(e *sqle.Engine, sm *SessionManager) *Handler {
+func NewHandler(e *sqle.Engine, sm *SessionManager, rt time.Duration) *Handler {
 	return &Handler{
-		e:  e,
-		sm: sm,
-		c:  make(map[uint32]*mysql.Conn),
+		e:           e,
+		sm:          sm,
+		c:           make(map[uint32]*mysql.Conn),
+		readTimeout: rt,
 	}
 }
 
@@ -86,6 +89,7 @@ func (h *Handler) ComQuery(
 	}
 
 	if handled {
+		logrus.Warn("XXX callback called  en handled")
 		return callback(&sqltypes.Result{})
 	}
 
@@ -109,6 +113,7 @@ func (h *Handler) ComQuery(
 		}
 
 		if r.RowsAffected == rowsBatch {
+			logrus.Warn("XXX callback called  en rowsBatch")
 			if err := callback(r); err != nil {
 				return err
 			}
@@ -119,23 +124,60 @@ func (h *Handler) ComQuery(
 			continue
 		}
 
-		row, err := rows.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
+		rowchan := make(chan sql.Row)
+		errchan := make(chan error)
+
+		go func(rowc chan sql.Row, errc chan error) {
+			for {
+				row, err := rows.Next()
+				if err != nil {
+					errc <- err
+					return
+				}
+				rowc <- row
 			}
+		}(rowchan, errchan)
 
-			return err
+		waitTime := 3600 * time.Second
+		if h.readTimeout > 0 {
+			waitTime = h.readTimeout
 		}
 
-		outputRow, err := rowToSQL(schema, row)
-		if err != nil {
-			return err
-		}
+		for {
+			select {
+			case err := <-errchan:
+				if err == io.EOF {
+					close(rowchan)
+					close(errchan)
+					logrus.Warn("XXX jump outside main for")
+					goto EndFor
+				}
 
-		r.Rows = append(r.Rows, outputRow)
-		r.RowsAffected++
+				return err
+			case row := <-rowchan:
+				//logrus.Warn("XXX recibido row:", row)
+				outputRow, err := rowToSQL(schema, row)
+				if err != nil {
+					close(rowchan)
+					close(errchan)
+					return err
+				}
+
+				r.Rows = append(r.Rows, outputRow)
+				r.RowsAffected++
+				//logrus.Warn("XXX rowsAffected:", r.RowsAffected)
+			case <-time.After(waitTime):
+				if h.readTimeout != 0 {
+					logrus.Warnf("Row read timeout expired afer %f seconds",
+						float64(h.readTimeout/time.Second))
+					close(rowchan)
+					close(errchan)
+					return RowTimeout.New()
+				}
+			}
+		}
 	}
+EndFor:
 
 	if err := rows.Close(); err != nil {
 		return err

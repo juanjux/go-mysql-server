@@ -2,10 +2,9 @@ package server
 
 import (
 	"context"
-	"sync"
-
-	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/opentracing/opentracing-go"
 	"github.com/src-d/go-mysql-server/sql"
+	"sync"
 	"vitess.io/vitess/go/mysql"
 )
 
@@ -74,6 +73,28 @@ func (s *SessionManager) session(conn *mysql.Conn) sql.Session {
 func (s *SessionManager) NewContext(conn *mysql.Conn) *sql.Context {
 	return s.NewContextWithQuery(conn, "")
 }
+
+// connChecker checks the connection, trying to peek() into it and if unsucessful
+// kills it
+//func (s *SessionManager) connChecker(c *mysql.Conn, ctx *sql.Context) {
+//	// Create a reader using the net.Conn to be able to Peek() into it
+//	reader := bufio.NewReader(c.Conn)
+//	counter := 0
+//
+//	for {
+//		counter += 1
+//		logrus.Warn("XXX connChecker running, counter:", counter)
+//		time.Sleep(3 * time.Second) // XXX change to something higher
+//		_, err := reader.Peek(1)
+//		if err != nil {
+//			logrus.Warn("XXX Peek failed with error:", err)
+//			s.CloseConn(c)
+//			logrus.Warn("XXX Session closed")
+//			return
+//		}
+//		logrus.Warn("XXX connChecker read OK")
+//	}
+//}
 
 // NewContextWithQuery creates a new context for the session at the given conn.
 func (s *SessionManager) NewContextWithQuery(
