@@ -22,7 +22,7 @@ import (
 var regKillCmd = regexp.MustCompile(`^kill (?:(query|connection) )?(\d+)$`)
 
 var errConnectionNotFound = errors.NewKind("Connection not found: %c")
-var RowTimeout = errors.NewKind("Timeout waiting for next row")
+var RowTimeout = errors.NewKind("Row read wait bigger than connection timeout")
 
 // TODO parametrize
 const rowsBatch = 100
@@ -89,7 +89,6 @@ func (h *Handler) ComQuery(
 	}
 
 	if handled {
-		logrus.Warn("XXX callback called  en handled")
 		return callback(&sqltypes.Result{})
 	}
 
@@ -107,77 +106,70 @@ func (h *Handler) ComQuery(
 
 	var r *sqltypes.Result
 	var proccesedAtLeastOneBatch bool
+
+	rowchan := make(chan sql.Row)
+	errchan := make(chan error)
+
+	// This goroutine will be selected giving a change to Vitess to call the
+	// handler.CloseConnection callback and enforcing the Timeout if configured
+	go func(rowc chan sql.Row, errc chan error) {
+		for {
+			row, err := rows.Next()
+			if err != nil {
+				errc <- err
+				return
+			}
+			rowc <- row
+		}
+	}(rowchan, errchan)
+
+	// Default (big) waitTime is 3600, but it wont matter if there is no timeout
+	// because the loop will just iterate again. If there is a timeout, it will
+	// be enforced to ensure that Vitess has a chance to call Handler.CloseConnection()
+	waitTime := 3600 * time.Second
+	if h.readTimeout > 0 {
+		waitTime = h.readTimeout
+	}
 	for {
 		if r == nil {
 			r = &sqltypes.Result{Fields: schemaToFields(schema)}
 		}
 
 		if r.RowsAffected == rowsBatch {
-			logrus.Warn("XXX callback called  en rowsBatch")
 			if err := callback(r); err != nil {
 				return err
 			}
 
 			r = nil
 			proccesedAtLeastOneBatch = true
-
 			continue
 		}
 
-		rowchan := make(chan sql.Row)
-		errchan := make(chan error)
-
-		go func(rowc chan sql.Row, errc chan error) {
-			for {
-				row, err := rows.Next()
-				if err != nil {
-					errc <- err
-					return
-				}
-				rowc <- row
+		select {
+		case err := <-errchan:
+			if err == io.EOF {
+				goto EndFor
 			}
-		}(rowchan, errchan)
 
-		waitTime := 3600 * time.Second
-		if h.readTimeout > 0 {
-			waitTime = h.readTimeout
-		}
-
-		for {
-			select {
-			case err := <-errchan:
-				if err == io.EOF {
-					close(rowchan)
-					close(errchan)
-					logrus.Warn("XXX jump outside main for")
-					goto EndFor
-				}
-
+			return err
+		case row := <-rowchan:
+			outputRow, err := rowToSQL(schema, row)
+			if err != nil {
 				return err
-			case row := <-rowchan:
-				//logrus.Warn("XXX recibido row:", row)
-				outputRow, err := rowToSQL(schema, row)
-				if err != nil {
-					close(rowchan)
-					close(errchan)
-					return err
-				}
+			}
 
-				r.Rows = append(r.Rows, outputRow)
-				r.RowsAffected++
-				//logrus.Warn("XXX rowsAffected:", r.RowsAffected)
-			case <-time.After(waitTime):
-				if h.readTimeout != 0 {
-					logrus.Warnf("Row read timeout expired afer %f seconds",
-						float64(h.readTimeout/time.Second))
-					close(rowchan)
-					close(errchan)
-					return RowTimeout.New()
-				}
+			r.Rows = append(r.Rows, outputRow)
+			r.RowsAffected++
+		case <-time.After(waitTime):
+			if h.readTimeout != 0 && waitTime >= h.readTimeout {
+				// Return so Vitess can call the CloseConnection callback
+				return RowTimeout.New()
 			}
 		}
 	}
 EndFor:
+	close(rowchan)
+	close(errchan)
 
 	if err := rows.Close(); err != nil {
 		return err

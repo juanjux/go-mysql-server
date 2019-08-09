@@ -1,18 +1,22 @@
 package server
 
 import (
+	"fmt"
 	"net"
 	"reflect"
 	"testing"
+	"time"
 	"unsafe"
 
-	"github.com/opentracing/opentracing-go"
 	sqle "github.com/src-d/go-mysql-server"
 	"github.com/src-d/go-mysql-server/mem"
 	"github.com/src-d/go-mysql-server/sql"
-	"github.com/stretchr/testify/require"
 	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/sqltypes"
+	"vitess.io/vitess/go/vt/proto/query"
+
+	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/stretchr/testify/require"
 )
 
 func setupMemDB(require *require.Assertions) *sqle.Engine {
@@ -34,13 +38,14 @@ func setupMemDB(require *require.Assertions) *sqle.Engine {
 	return e
 }
 
+// This session builder is used as dummy mysql Conn is not complete and
+// causes panic when accessing remote address.
+func testSessionBuilder(c *mysql.Conn, addr string) sql.Session {
+	client := "127.0.0.1:34567"
+	return sql.NewSession(addr, client, c.User, c.ConnectionID)
+}
+
 func TestHandlerOutput(t *testing.T) {
-	// This session builder is used as dummy mysql Conn is not complete and
-	// causes panic when accessing remote address.
-	testSessionBuilder := func(c *mysql.Conn, addr string) sql.Session {
-		client := "127.0.0.1:34567"
-		return sql.NewSession(addr, client, c.User, c.ConnectionID)
-	}
 
 	e := setupMemDB(require.New(t))
 	dummyConn := &mysql.Conn{ConnectionID: 1}
@@ -158,61 +163,61 @@ type mockConn struct {
 
 func (c *mockConn) Close() error { return nil }
 
-//func TestHandlerKill(t *testing.T) {
-//	require := require.New(t)
-//	e := setupMemDB(require)
-//
-//	handler := NewHandler(
-//		e,
-//		NewSessionManager(
-//			func(conn *mysql.Conn, addr string) sql.Session {
-//				return sql.NewSession(addr, "", "", conn.ConnectionID)
-//			},
-//			opentracing.NoopTracer{},
-//			"foo",
-//		),
-//		0,
-//	)
-//
-//	require.Len(handler.c, 0)
-//
-//	conn1 := newConn(1)
-//	handler.NewConnection(conn1)
-//	conn2 := newConn(2)
-//	handler.NewConnection(conn2)
-//
-//	require.Len(handler.sm.sessions, 0)
-//	require.Len(handler.c, 2)
-//
-//	err := handler.ComQuery(conn2, "KILL QUERY 1", func(res *sqltypes.Result) error {
-//		return nil
-//	})
-//
-//	require.NoError(err)
-//
-//	require.Len(handler.sm.sessions, 1)
-//	require.Len(handler.c, 2)
-//	require.Equal(conn1, handler.c[1])
-//	require.Equal(conn2, handler.c[2])
-//
-//	assertNoConnProcesses(t, e, conn2.ConnectionID)
-//
-//	ctx1 := handler.sm.NewContextWithQuery(conn1, "SELECT 1")
-//	ctx1, err = handler.e.Catalog.AddProcess(ctx1, sql.QueryProcess, "SELECT 1")
-//	require.NoError(err)
-//
-//	err = handler.ComQuery(conn2, "KILL "+fmt.Sprint(ctx1.ID()), func(res *sqltypes.Result) error {
-//		return nil
-//	})
-//	require.NoError(err)
-//
-//	require.Len(handler.sm.sessions, 1)
-//	require.Len(handler.c, 1)
-//	_, ok := handler.c[1]
-//	require.False(ok)
-//	assertNoConnProcesses(t, e, conn1.ConnectionID)
-//}
-//
+func TestHandlerKill(t *testing.T) {
+	require := require.New(t)
+	e := setupMemDB(require)
+
+	handler := NewHandler(
+		e,
+		NewSessionManager(
+			func(conn *mysql.Conn, addr string) sql.Session {
+				return sql.NewSession(addr, "", "", conn.ConnectionID)
+			},
+			opentracing.NoopTracer{},
+			"foo",
+		),
+		0,
+	)
+
+	require.Len(handler.c, 0)
+
+	conn1 := newConn(1)
+	handler.NewConnection(conn1)
+	conn2 := newConn(2)
+	handler.NewConnection(conn2)
+
+	require.Len(handler.sm.sessions, 0)
+	require.Len(handler.c, 2)
+
+	err := handler.ComQuery(conn2, "KILL QUERY 1", func(res *sqltypes.Result) error {
+		return nil
+	})
+
+	require.NoError(err)
+
+	require.Len(handler.sm.sessions, 1)
+	require.Len(handler.c, 2)
+	require.Equal(conn1, handler.c[1])
+	require.Equal(conn2, handler.c[2])
+
+	assertNoConnProcesses(t, e, conn2.ConnectionID)
+
+	ctx1 := handler.sm.NewContextWithQuery(conn1, "SELECT 1")
+	ctx1, err = handler.e.Catalog.AddProcess(ctx1, sql.QueryProcess, "SELECT 1")
+	require.NoError(err)
+
+	err = handler.ComQuery(conn2, "KILL "+fmt.Sprint(ctx1.ID()), func(res *sqltypes.Result) error {
+		return nil
+	})
+	require.NoError(err)
+
+	require.Len(handler.sm.sessions, 1)
+	require.Len(handler.c, 1)
+	_, ok := handler.c[1]
+	require.False(ok)
+	assertNoConnProcesses(t, e, conn1.ConnectionID)
+}
+
 func assertNoConnProcesses(t *testing.T, e *sqle.Engine, conn uint32) {
 	t.Helper()
 
@@ -223,54 +228,59 @@ func assertNoConnProcesses(t *testing.T, e *sqle.Engine, conn uint32) {
 	}
 }
 
+func TestSchemaToFields(t *testing.T) {
+	require := require.New(t)
 
-//func TestSchemaToFields(t *testing.T) {
-//	require := require.New(t)
-//
-//	schema := sql.Schema{
-//		{Name: "foo", Type: sql.Blob},
-//		{Name: "bar", Type: sql.Text},
-//		{Name: "baz", Type: sql.Int64},
-//	}
-//
-//	expected := []*query.Field{
-//		{Name: "foo", Type: query.Type_BLOB, Charset: mysql.CharacterSetBinary},
-//		{Name: "bar", Type: query.Type_TEXT, Charset: mysql.CharacterSetUtf8},
-//		{Name: "baz", Type: query.Type_INT64, Charset: mysql.CharacterSetUtf8},
-//	}
-//
-//	fields := schemaToFields(schema)
-//	require.Equal(expected, fields)
-//}
+	schema := sql.Schema{
+		{Name: "foo", Type: sql.Blob},
+		{Name: "bar", Type: sql.Text},
+		{Name: "baz", Type: sql.Int64},
+	}
 
-//func TestHandlerTimeout(t *testing.T) {
-//	require := require.New(t)
-//
-//	// XXX move to function
-//	testSessionBuilder := func(c *mysql.Conn, addr string) sql.Session {
-//		client := "127.0.0.1:34567"
-//		return sql.NewSession(addr, client, c.User, c.ConnectionID)
-//	}
-//
-//	e := setupMemDB(require)
-//
-//	timeOutHandler := NewHandler(
-//		e, NewSessionManager(testSessionBuilder, opentracing.NoopTracer{}, "foo"),
-//		1)
-//	noTimeOutHandler := NewHandler(
-//		e, NewSessionManager(testSessionBuilder, opentracing.NoopTracer{}, "foo"),
-//		0)
-//	require.Equal(timeOutHandler.readTimeout, 1)
-//	require.Equal(noTimeOutHandler.readTimeout, 0)
-//
-//	connTimeout := newConn(1)
-//	timeOutHandler.NewConnection(connTimeout)
-//	connNoTimeout := newConn(2)
-//	noTimeOutHandler.NewConnection(connNoTimeout)
-//
-//	err := timeOutHandler.ComQuery(connTimeout, "SELECT SLEEP(2)", func(res *sqltypes.Result) error {
-//		return nil
-//	})
-//
-//	require.NoError(err)
-//}
+	expected := []*query.Field{
+		{Name: "foo", Type: query.Type_BLOB, Charset: mysql.CharacterSetBinary},
+		{Name: "bar", Type: query.Type_TEXT, Charset: mysql.CharacterSetUtf8},
+		{Name: "baz", Type: query.Type_INT64, Charset: mysql.CharacterSetUtf8},
+	}
+
+	fields := schemaToFields(schema)
+	require.Equal(expected, fields)
+}
+
+func TestHandlerTimeout(t *testing.T) {
+	require := require.New(t)
+
+	e := setupMemDB(require)
+	e2 := setupMemDB(require)
+
+	timeOutHandler := NewHandler(
+		e, NewSessionManager(testSessionBuilder, opentracing.NoopTracer{}, "foo"),
+		1 * time.Second)
+
+	noTimeOutHandler := NewHandler(
+		e2, NewSessionManager(testSessionBuilder, opentracing.NoopTracer{}, "foo"),
+		0)
+	require.Equal(1 * time.Second, timeOutHandler.readTimeout)
+	require.Equal(0 * time.Second, noTimeOutHandler.readTimeout)
+
+	connTimeout := newConn(1)
+	timeOutHandler.NewConnection(connTimeout)
+
+	connNoTimeout := newConn(2)
+	noTimeOutHandler.NewConnection(connNoTimeout)
+
+	err := timeOutHandler.ComQuery(connTimeout, "SELECT SLEEP(2)", func(res *sqltypes.Result) error {
+		return nil
+	})
+	require.EqualError(err, "Row read wait bigger than connection timeout")
+
+	err = timeOutHandler.ComQuery(connTimeout, "SELECT SLEEP(0.5)", func(res *sqltypes.Result) error {
+		return nil
+	})
+	require.NoError(err)
+
+	err = noTimeOutHandler.ComQuery(connNoTimeout, "SELECT SLEEP(2)", func(res *sqltypes.Result) error {
+		return nil
+	})
+	require.NoError(err)
+}
