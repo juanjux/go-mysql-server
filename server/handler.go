@@ -109,7 +109,7 @@ func (h *Handler) ComQuery(
 
 	rowchan := make(chan sql.Row)
 	errchan := make(chan error)
-	quit := make(chan bool, 2)
+	quit := make(chan struct{})
 
 	// This goroutine will be select{}ed giving a change to Vitess to call the
 	// handler.CloseConnection callback and enforcing the timeout if configured
@@ -132,10 +132,14 @@ func (h *Handler) ComQuery(
 	// Default (big) waitTime is 3600, but it wont matter if there is no timeout
 	// because the loop will just iterate again. If there is a timeout, it will
 	// be enforced to ensure that Vitess has a chance to call Handler.CloseConnection()
-	waitTime := 1 * time.Second
+	totalTime := 0 * time.Second
+	waitTime := 10 * time.Second
+
 	if h.readTimeout > 0 {
 		waitTime = h.readTimeout
 	}
+	timer := time.NewTimer(waitTime)
+
 rowLoop:
 	for {
 		if r == nil {
@@ -162,21 +166,25 @@ rowLoop:
 		case row := <-rowchan:
 			outputRow, err := rowToSQL(schema, row)
 			if err != nil {
-				quit <-true
+				close(quit)
 				break rowLoop
 			}
 
 			r.Rows = append(r.Rows, outputRow)
 			r.RowsAffected++
-		case <-time.After(waitTime):
-			if h.readTimeout != 0 && waitTime >= h.readTimeout {
+		case <-timer.C:
+			totalTime += waitTime
+			if h.readTimeout != 0 && totalTime >= h.readTimeout {
 				// Return so Vitess can call the CloseConnection callback
 				err = RowTimeout.New()
-				quit <- true
+				close(quit)
 				break rowLoop
 			}
 		}
+		timer.Reset(waitTime)
 	}
+
+	timer.Stop()
 
 	if err != nil {
 		return err
