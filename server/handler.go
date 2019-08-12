@@ -21,8 +21,9 @@ import (
 
 var regKillCmd = regexp.MustCompile(`^kill (?:(query|connection) )?(\d+)$`)
 
-var errConnectionNotFound = errors.NewKind("Connection not found: %c")
-var RowTimeout = errors.NewKind("Row read wait bigger than connection timeout")
+var errConnectionNotFound = errors.NewKind("connection not found: %c")
+// ErrRowTimeout will be returned if the wait for the row is longer than the connection timeout
+var ErrRowTimeout = errors.NewKind("row read wait bigger than connection timeout")
 
 // TODO parametrize
 const rowsBatch = 100
@@ -111,7 +112,7 @@ func (h *Handler) ComQuery(
 	errchan := make(chan error)
 	quit := make(chan struct{})
 
-	// This goroutine will be select{}ed giving a change to Vitess to call the
+	// This goroutine will be select{}ed giving a chance to Vitess to call the
 	// handler.CloseConnection callback and enforcing the timeout if configured
 	go func() {
 		for {
@@ -129,15 +130,17 @@ func (h *Handler) ComQuery(
 		}
 	}()
 
-	// Default (big) waitTime is one hour if there is not timeout configured, in which case
-	// it will loop to iterate again. If there is a timeout, it will
-	// be enforced to ensure that Vitess has a chance to call Handler.CloseConnection()
-	waitTime := 1 * time.Hour
+	// Default waitTime is one 1 minute if there is not timeout configured, in which case
+	// it will loop to iterate again unless the socket died by the OS timeout or other problems.
+	// If there is a timeout, it will be enforced to ensure that Vitess has a chance to
+	// call Handler.CloseConnection()
+	waitTime := 1 * time.Minute
 
 	if h.readTimeout > 0 {
 		waitTime = h.readTimeout
 	}
-	timer := time.NewTimer(h.readTimeout)
+	timer := time.NewTimer(waitTime)
+	defer timer.Stop()
 
 rowLoop:
 	for {
@@ -156,36 +159,28 @@ rowLoop:
 		}
 
 		select {
-		case err := <-errchan:
+		case err = <-errchan:
 			if err == io.EOF {
 				break rowLoop
 			}
-
 			return err
 		case row := <-rowchan:
 			outputRow, err := rowToSQL(schema, row)
 			if err != nil {
 				close(quit)
-				break rowLoop
+				return err
 			}
 
 			r.Rows = append(r.Rows, outputRow)
 			r.RowsAffected++
 		case <-timer.C:
-			if h.readTimeout != 0 && waitTime >= h.readTimeout {
+			if h.readTimeout != 0 {
 				// Return so Vitess can call the CloseConnection callback
-				err = RowTimeout.New()
 				close(quit)
-				break rowLoop
+				return ErrRowTimeout.New()
 			}
 		}
 		timer.Reset(waitTime)
-	}
-
-	timer.Stop()
-
-	if err != nil {
-		return err
 	}
 
 	if err := rows.Close(); err != nil {
@@ -200,6 +195,7 @@ rowLoop:
 		return nil
 	}
 
+	close(quit)
 	return callback(r)
 }
 

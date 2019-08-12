@@ -41,7 +41,7 @@ func setupMemDB(require *require.Assertions) *sqle.Engine {
 // This session builder is used as dummy mysql Conn is not complete and
 // causes panic when accessing remote address.
 func testSessionBuilder(c *mysql.Conn, addr string) sql.Session {
-	client := "127.0.0.1:34567"
+	const client = "127.0.0.1:34567"
 	return sql.NewSession(addr, client, c.User, c.ConnectionID)
 }
 
@@ -272,7 +272,7 @@ func TestHandlerTimeout(t *testing.T) {
 	err := timeOutHandler.ComQuery(connTimeout, "SELECT SLEEP(2)", func(res *sqltypes.Result) error {
 		return nil
 	})
-	require.EqualError(err, "Row read wait bigger than connection timeout")
+	require.EqualError(err, "row read wait bigger than connection timeout")
 
 	err = timeOutHandler.ComQuery(connTimeout, "SELECT SLEEP(0.5)", func(res *sqltypes.Result) error {
 		return nil
