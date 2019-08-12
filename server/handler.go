@@ -129,16 +129,15 @@ func (h *Handler) ComQuery(
 		}
 	}()
 
-	// Default (big) waitTime is 3600, but it wont matter if there is no timeout
-	// because the loop will just iterate again. If there is a timeout, it will
+	// Default (big) waitTime is one hour if there is not timeout configured, in which case
+	// it will loop to iterate again. If there is a timeout, it will
 	// be enforced to ensure that Vitess has a chance to call Handler.CloseConnection()
-	totalTime := 0 * time.Second
-	waitTime := 10 * time.Second
+	waitTime := 1 * time.Hour
 
 	if h.readTimeout > 0 {
 		waitTime = h.readTimeout
 	}
-	timer := time.NewTimer(waitTime)
+	timer := time.NewTimer(h.readTimeout)
 
 rowLoop:
 	for {
@@ -173,8 +172,7 @@ rowLoop:
 			r.Rows = append(r.Rows, outputRow)
 			r.RowsAffected++
 		case <-timer.C:
-			totalTime += waitTime
-			if h.readTimeout != 0 && totalTime >= h.readTimeout {
+			if h.readTimeout != 0 && waitTime >= h.readTimeout {
 				// Return so Vitess can call the CloseConnection callback
 				err = RowTimeout.New()
 				close(quit)
